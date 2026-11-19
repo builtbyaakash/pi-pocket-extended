@@ -94,6 +94,7 @@ import {
     createWorktree,
     discardWorktree,
     inWorktree,
+    parkWork,
     removeWorktree,
     sourceFolders,
     type Worktree,
@@ -577,6 +578,31 @@ export class Commands {
 
         app.requireSee(user, id);
         await app.requireDriver(id, user);
+
+        const { worktree } = await this.#retireWorktree(id, force === true);
+        const cwd = app.cwdOf(id);
+
+        await app.collab.activity(
+            id,
+            user,
+            `removed the worktree; the branch ${worktree.branch} stays, and Pi works in ${homePath(cwd)} again`,
+        );
+    }
+
+    /**
+     * Take a session out of its worktree: its folder goes, its branch stays with everything committed on it, and the
+     * session and its subagents go back to the folders the worktree came from. Throws what the command throws: a
+     * worktree Pi is working in, or one another session shares, stays.
+     *
+     * `park` commits uncommitted work first, on the branch, so that the folder can go without losing any of it. It runs
+     * after the refusals, never while Pi is working there.
+     */
+    async #retireWorktree(
+        id: ConversationId,
+        force: boolean,
+        park?: string,
+    ): Promise<{ worktree: Worktree; parked: boolean }> {
+        const app = this.#app;
         const worktree = app.sessionMeta(id)?.worktree;
 
         if (app.workspaceScheme(app.cwdOf(id)) !== undefined) {
@@ -616,7 +642,9 @@ export class Commands {
             .filter((each) => inside(app.cwdOf(each)))
             .map((each) => ({ id: each, cwd: back(app.cwdOf(each)) }));
 
-        await removeWorktree(worktree, force === true);
+        const parked = park === undefined ? false : await parkWork(worktree, park);
+
+        await removeWorktree(worktree, force);
 
         // The session and its subagents go back to the folders the worktree came from.
         for (const move of moves) {
@@ -635,11 +663,41 @@ export class Commands {
             delete meta.worktree;
             meta.cwd = cwd;
         }, context);
-        await app.collab.activity(
-            id,
-            user,
-            `removed the worktree; the branch ${worktree.branch} stays, and Pi works in ${homePath(cwd)} again`,
-        );
+
+        return { worktree, parked };
+    }
+
+    /**
+     * Archiving ends a session's work here, so its worktree is reclaimed rather than left in the data folder for good:
+     * uncommitted work is committed onto its branch, the folder goes, and the session works in the folder the worktree
+     * came from again. Best effort: the archive itself must not fail, so a worktree Pi is working in, or one another
+     * session shares, stays, and the session says why in its activity.
+     */
+    async #reclaimArchivedWorktree(id: ConversationId, user: User): Promise<void> {
+        const app = this.#app;
+
+        if (app.sessionMeta(id)?.worktree === undefined) {
+            return;
+        }
+
+        try {
+            const { worktree, parked } = await this.#retireWorktree(
+                id,
+                false,
+                "pi-pocket: work in this worktree when its session was archived\n\n" +
+                    "Committed as the folder was reclaimed, so none of this is lost.",
+            );
+
+            await app.collab.activity(
+                id,
+                user,
+                parked
+                    ? `removed the worktree; its uncommitted work is committed to ${worktree.branch}, which stays`
+                    : `removed the worktree; the branch ${worktree.branch} stays`,
+            );
+        } catch (error) {
+            await app.collab.activity(id, user, `kept the worktree: ${describe(error)}`);
+        }
     }
 
     /** The model and thinking level a new session starts with now. */
@@ -773,6 +831,11 @@ export class Commands {
                     ? "archived the session"
                     : "brought the session back from the archive",
             );
+
+            // Archiving ends the session's work here: its worktree is reclaimed, with its work kept on the branch.
+            if (patch.archived) {
+                await this.#reclaimArchivedWorktree(id, user);
+            }
         }
 
         // Archiving leaves its repeating schedules running: the person is told how many.

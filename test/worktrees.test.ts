@@ -221,3 +221,70 @@ test("a worktree another session works in stays, and a session's subagents leave
     assert.equal(app.cwdOf(id), join(repo, "app"));
     assert.equal(app.cwdOf(helper), join(repo, "app"), "the helper went back with it");
 });
+
+test("archiving a session reclaims its worktree, and its uncommitted work lands on the branch", async () => {
+    const { id } = await app.commands.createSession(owner(app), {
+        cwd: join(repo, "app"),
+        worktree: true,
+    });
+    const worktree = app.sessionMeta(id)!.worktree!;
+
+    // Work left uncommitted, the way a session stops mid-edit.
+    writeFileSync(join(worktree.path, "app", "wip.md"), "half done\n");
+    writeFileSync(join(worktree.path, "app", "main.ts"), "export const answer = 99;\n");
+
+    await app.commands.updateSession(id, owner(app), { archived: true });
+
+    assert.equal(existsSync(worktree.path), false, "the worktree folder is gone");
+    assert.equal(app.sessionMeta(id)?.worktree, undefined);
+    assert.equal(
+        app.cwdOf(id),
+        join(repo, "app"),
+        "the archived session works in the original folder again",
+    );
+    assert.match(
+        gitIn(repo, "branch", "--list", worktree.branch),
+        new RegExp(worktree.branch),
+        "the branch stays",
+    );
+    assert.equal(
+        gitIn(repo, "show", `${worktree.branch}:app/wip.md`),
+        "half done",
+        "the new file was committed, not lost",
+    );
+    assert.equal(
+        gitIn(repo, "show", `${worktree.branch}:app/main.ts`),
+        "export const answer = 99;",
+        "the edit was committed, not lost",
+    );
+});
+
+test("archiving leaves a worktree another session works in, and says why", async () => {
+    const { id } = await app.commands.createSession(owner(app), {
+        cwd: join(repo, "app"),
+        worktree: true,
+    });
+    const worktree = app.sessionMeta(id)!.worktree!;
+
+    await app.commands.configure(id, owner(app), {
+        model: { provider: "faux", modelId: "faux-1" },
+    });
+    const { submissionId } = await app.commands.submit(id, owner(app), {
+        text: "work slowly",
+        requestId: "slow-archive",
+    });
+
+    await until(() => app.isBusy(id), "Pi to start");
+    await app.commands.updateSession(id, owner(app), { archived: true });
+
+    assert.equal(
+        existsSync(worktree.path),
+        true,
+        "a worktree Pi is working in is not pulled out from under it",
+    );
+    assert.notEqual(app.sessionMeta(id)?.worktree, undefined, "the session keeps its worktree");
+
+    await app.commands.abort(id, owner(app));
+    await (await app.harness.submission(submissionId, context))!.wait(context);
+    await until(() => !app.isBusy(id), "Pi to stop");
+});

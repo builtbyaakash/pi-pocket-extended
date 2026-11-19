@@ -206,3 +206,22 @@ export async function discardWorktree(worktree: Worktree): Promise<void> {
         await git(root, ["branch", "-D", worktree.branch]);
     }
 }
+
+/**
+ * Commit whatever is uncommitted in the worktree, on its own branch, so that removing the folder loses nothing.
+ * Returns whether there was anything to commit. A folder already gone, or one with nothing uncommitted, commits nothing.
+ */
+export async function parkWork(worktree: Worktree, message: string): Promise<boolean> {
+    if (!existsSync(worktree.path)) {
+        return false;
+    }
+
+    if ((await git(worktree.path, ["status", "--porcelain"])).trim() === "") {
+        return false;
+    }
+
+    await git(worktree.path, ["add", "-A"]);
+    await git(worktree.path, ["commit", "-m", message]);
+
+    return true;
+}
